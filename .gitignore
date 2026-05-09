@@ -1,0 +1,19 @@
+# Secrets
+config.json
+
+# Runtime files
+data/*
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Logs
+*.log
+
+# Editors
+.vscode/
+.idea/

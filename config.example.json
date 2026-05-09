@@ -1,0 +1,30 @@
+{
+  "github": {
+    "username_to_watch": "xxx",
+    "token": "",
+    "api_version": "2022-11-28",
+    "events_per_page": 30,
+    "notify_event_types": [],
+    "ignore_repos": []
+  },
+  "email": {
+    "smtp_host": "smtp.qq.com",
+    "smtp_port": 465,
+    "use_ssl": true,
+    "use_starttls": false,
+    "sender": "xxx@qq.com",
+    "sender_name": "GitHub Activity Monitor",
+    "auth_code": "xxx",
+    "recipients": [
+      "xxx@qq.com"
+    ],
+    "subject_prefix": "[GitHub Activity]"
+  },
+  "runtime": {
+    "state_file": "data/state.json",
+    "log_file": "data/monitor.log",
+    "first_run_behavior": "record_only",
+    "max_seen_ids": 500,
+    "request_timeout_seconds": 20
+  }
+}
