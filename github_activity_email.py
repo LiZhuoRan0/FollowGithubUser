@@ -346,6 +346,19 @@ def fetch_public_events(
     logging.info("Fetched %d event(s) from GitHub.", len(events))
     return events, new_etag, poll_interval, False
 
+def fetch_compare(
+    config: GithubConfig,
+    repo: str,
+    before: str,
+    head: str,
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    url = f"https://api.github.com/repos/{repo}/compare/{before}...{head}"
+    headers = build_github_headers(config, etag=None)
+
+    response = requests.get(url, headers=headers, timeout=timeout_seconds)
+    response.raise_for_status()
+    return response.json()
 
 # -----------------------------
 # Event formatting and filtering
@@ -378,7 +391,11 @@ def should_notify(event: Dict[str, Any], github: GithubConfig) -> bool:
     return True
 
 
-def summarize_push_event(event: Dict[str, Any]) -> List[str]:
+def summarize_push_event(
+    event: Dict[str, Any],
+    github: GithubConfig,
+    timeout_seconds: int,
+) -> List[str]:
     payload = event.get("payload", {}) or {}
     repo = repo_name(event)
     lines = []
@@ -388,7 +405,44 @@ def summarize_push_event(event: Dict[str, Any]) -> List[str]:
         lines.append(f"Branch/ref: {ref}")
 
     commits = payload.get("commits", []) or []
-    lines.append(f"Commits: {len(commits)}")
+    lines.append(f"Commits included in event payload: {len(commits)}")
+
+    before = as_string(payload.get("before"), "")
+    head = as_string(payload.get("head"), "")
+    zero_sha = "0" * 40
+
+    if not commits and before and head and before != zero_sha and "/" in repo:
+        try:
+            compare = fetch_compare(github, repo, before, head, timeout_seconds)
+            compare_commits = compare.get("commits", []) or []
+            lines.append(f"Commits found by compare API: {len(compare_commits)}")
+
+            commits = [
+                {
+                    "sha": c.get("sha", ""),
+                    "message": c.get("commit", {}).get("message", ""),
+                    "author": c.get("commit", {}).get("author", {}),
+                }
+                for c in compare_commits
+            ]
+
+            lines.append(f"Compare URL: https://github.com/{repo}/compare/{before}...{head}")
+
+        except requests.RequestException as exc:
+            lines.append("Could not fetch commit details from compare API.")
+            lines.append(f"Reason: {exc}")
+
+    before = as_string(payload.get("before"), "")
+    head = as_string(payload.get("head"), "")
+
+    if head and "/" in repo:
+        lines.append(f"Head commit: {head[:7]}")
+        lines.append(f"Head commit URL: https://github.com/{repo}/commit/{head}")
+
+    if before and head and "/" in repo:
+        zero_sha = "0" * 40
+        if before != zero_sha:
+            lines.append(f"Compare URL: https://github.com/{repo}/compare/{before}...{head}")
 
     for commit in commits[:10]:
         sha = as_string(commit.get("sha"), "")
@@ -414,7 +468,11 @@ def summarize_push_event(event: Dict[str, Any]) -> List[str]:
     return lines
 
 
-def summarize_event(event: Dict[str, Any]) -> str:
+def summarize_event(
+    event: Dict[str, Any],
+    github: GithubConfig,
+    timeout_seconds: int,
+) -> str:
     event_type = as_string(event.get("type"), "UnknownEvent")
     actor = event.get("actor", {}) or {}
     actor_login = as_string(actor.get("login"), "unknown")
@@ -433,7 +491,7 @@ def summarize_event(event: Dict[str, Any]) -> str:
         lines.append(f"Repo URL: {r_url}")
 
     if event_type == "PushEvent":
-        lines.extend(summarize_push_event(event))
+        lines.extend(summarize_push_event(event, github, timeout_seconds))
 
     elif event_type == "PullRequestEvent":
         pr = payload.get("pull_request", {}) or {}
@@ -513,7 +571,12 @@ def summarize_event(event: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_email_body(username: str, new_events: List[Dict[str, Any]]) -> str:
+def build_email_body(
+    username: str,
+    new_events: List[Dict[str, Any]],
+    github: GithubConfig,
+    timeout_seconds: int,
+) -> str:
     plural = "event" if len(new_events) == 1 else "events"
     header = [
         f"New public GitHub activity detected for: {username}",
@@ -525,7 +588,7 @@ def build_email_body(username: str, new_events: List[Dict[str, Any]]) -> str:
 
     sections = []
     for i, event in enumerate(new_events, start=1):
-        sections.append(f"#{i}\n{summarize_event(event)}")
+        sections.append(f"#{i}\n{summarize_event(event, github, timeout_seconds)}")
 
     separator = "\n\n" + ("-" * 60) + "\n\n"
     if sections:
@@ -686,7 +749,12 @@ def run_monitor(config: AppConfig, dry_run: bool = False) -> int:
 
     if new_events:
         subject = f"{config.email.subject_prefix} {len(new_events)} new event(s) from {config.github.username_to_watch}"
-        body = build_email_body(config.github.username_to_watch, new_events)
+        body = build_email_body(
+            config.github.username_to_watch,
+            new_events,
+            config.github,
+            config.runtime.request_timeout_seconds,
+        )
 
         if dry_run:
             print("DRY RUN: would send this email:")
