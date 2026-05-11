@@ -45,7 +45,7 @@ DEFAULT_CONFIG_FILE = "config.json"
 
 @dataclass
 class GithubConfig:
-    username_to_watch: str
+    usernames_to_watch: List[str]
     token: str
     api_version: str
     events_per_page: int
@@ -162,11 +162,17 @@ def load_config(config_path: Path) -> AppConfig:
     email_raw = raw.get("email", {})
     runtime_raw = raw.get("runtime", {})
 
+    usernames_raw = github_raw.get("usernames_to_watch", github_raw.get("username_to_watch"))
+
+    if isinstance(usernames_raw, list):
+        usernames_to_watch = as_string_list(usernames_raw)
+    else:
+        usernames_to_watch = [
+            require_string(usernames_raw, "github.usernames_to_watch")
+        ]
+
     github = GithubConfig(
-        username_to_watch=require_string(
-            github_raw.get("username_to_watch"),
-            "github.username_to_watch",
-        ),
+        usernames_to_watch=usernames_to_watch,
         token=as_string(github_raw.get("token"), "").strip(),
         api_version=as_string(github_raw.get("api_version"), "2022-11-28").strip(),
         events_per_page=max(1, min(as_int(github_raw.get("events_per_page"), 30), 100)),
@@ -232,7 +238,7 @@ def now_iso() -> str:
 # State management
 # -----------------------------
 
-def default_state() -> Dict[str, Any]:
+def default_user_state() -> Dict[str, Any]:
     return {
         "seen_ids": [],
         "etag": None,
@@ -240,6 +246,25 @@ def default_state() -> Dict[str, Any]:
         "last_success_at": None,
         "last_poll_interval_seconds": None,
     }
+
+
+def default_state() -> Dict[str, Any]:
+    return {
+        "users": {}
+    }
+
+
+def get_user_state(state: Dict[str, Any], username: str) -> Dict[str, Any]:
+    users = state.setdefault("users", {})
+
+    merged = default_user_state()
+    merged.update(users.get(username, {}))
+
+    if not isinstance(merged.get("seen_ids"), list):
+        merged["seen_ids"] = []
+
+    users[username] = merged
+    return merged
 
 
 def load_state(state_file: Path) -> Dict[str, Any]:
@@ -295,6 +320,7 @@ def build_github_headers(config: GithubConfig, etag: Optional[str]) -> Dict[str,
 
 def fetch_public_events(
     config: GithubConfig,
+    username: str,
     etag: Optional[str],
     timeout_seconds: int,
 ) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[int], bool]:
@@ -302,11 +328,11 @@ def fetch_public_events(
     Return:
         events, new_etag, poll_interval_seconds, not_modified
     """
-    url = f"https://api.github.com/users/{config.username_to_watch}/events/public"
+    url = f"https://api.github.com/users/{username}/events/public"
     params = {"per_page": config.events_per_page}
     headers = build_github_headers(config, etag)
 
-    logging.info("Checking GitHub public events for user '%s'.", config.username_to_watch)
+    logging.info("Checking GitHub public events for user '%s'.", username)
     response = requests.get(url, headers=headers, params=params, timeout=timeout_seconds)
 
     poll_interval_raw = response.headers.get("X-Poll-Interval")
@@ -323,7 +349,7 @@ def fetch_public_events(
 
     if response.status_code == 404:
         raise RuntimeError(
-            f"GitHub user '{config.username_to_watch}' was not found, "
+            f"GitHub user '{username}' was not found, "
             "or the events endpoint is unavailable for this user."
         )
 
@@ -715,63 +741,90 @@ def run_monitor(config: AppConfig, dry_run: bool = False) -> int:
     state_file = resolve_path(config.runtime.state_file)
     state = load_state(state_file)
 
-    old_seen_ids = state.get("seen_ids", [])
-    was_first_run = len(old_seen_ids) == 0 and not state_file.exists()
+    exit_code = 0
 
-    events, new_etag, poll_interval, not_modified = fetch_public_events(
-        config.github,
-        etag=state.get("etag"),
-        timeout_seconds=config.runtime.request_timeout_seconds,
-    )
+    for username in config.github.usernames_to_watch:
+        user_state = get_user_state(state, username)
 
-    state["last_run_at"] = now_iso()
-    if poll_interval is not None:
-        state["last_poll_interval_seconds"] = poll_interval
-        logging.info("GitHub X-Poll-Interval: %s seconds.", poll_interval)
+        old_seen_ids = user_state.get("seen_ids", [])
+        was_first_run = len(old_seen_ids) == 0 and not user_state.get("last_success_at")
 
-    if not_modified:
-        maybe_save_state(state_file, state, dry_run)
-        return 0
+        try:
+            events, new_etag, poll_interval, not_modified = fetch_public_events(
+                config.github,
+                username=username,
+                etag=user_state.get("etag"),
+                timeout_seconds=config.runtime.request_timeout_seconds,
+            )
 
-    if was_first_run and config.runtime.first_run_behavior == "record_only":
-        logging.info(
-            "First run detected. Recording current events without sending an email. "
-            "Set runtime.first_run_behavior to 'notify' if you want first-run emails."
-        )
-        state["seen_ids"] = update_seen_ids(old_seen_ids, events, config.runtime.max_seen_ids)
-        state["etag"] = new_etag or state.get("etag")
-        state["last_success_at"] = now_iso()
-        maybe_save_state(state_file, state, dry_run)
-        return 0
+            user_state["last_run_at"] = now_iso()
 
-    new_events = get_new_events(events, old_seen_ids, config.github)
-    logging.info("Detected %d new notifiable event(s).", len(new_events))
+            if poll_interval is not None:
+                user_state["last_poll_interval_seconds"] = poll_interval
+                logging.info(
+                    "GitHub X-Poll-Interval for %s: %s seconds.",
+                    username,
+                    poll_interval,
+                )
 
-    if new_events:
-        subject = f"{config.email.subject_prefix} {len(new_events)} new event(s) from {config.github.username_to_watch}"
-        body = build_email_body(
-            config.github.username_to_watch,
-            new_events,
-            config.github,
-            config.runtime.request_timeout_seconds,
-        )
+            if not_modified:
+                continue
 
-        if dry_run:
-            print("DRY RUN: would send this email:")
-            print("=" * 80)
-            print("Subject:", subject)
-            print(body)
-            print("=" * 80)
-        else:
-            send_email(config.email, subject, body)
-    else:
-        logging.info("No email needed.")
+            if was_first_run and config.runtime.first_run_behavior == "record_only":
+                logging.info(
+                    "First run detected for %s. Recording current events without sending an email.",
+                    username,
+                )
+                user_state["seen_ids"] = update_seen_ids(
+                    old_seen_ids,
+                    events,
+                    config.runtime.max_seen_ids,
+                )
+                user_state["etag"] = new_etag or user_state.get("etag")
+                user_state["last_success_at"] = now_iso()
+                continue
 
-    state["seen_ids"] = update_seen_ids(old_seen_ids, events, config.runtime.max_seen_ids)
-    state["etag"] = new_etag or state.get("etag")
-    state["last_success_at"] = now_iso()
+            new_events = get_new_events(events, old_seen_ids, config.github)
+            logging.info(
+                "Detected %d new notifiable event(s) for %s.",
+                len(new_events),
+                username,
+            )
+
+            if new_events:
+                subject = f"{config.email.subject_prefix} {len(new_events)} new event(s) from {username}"
+                body = build_email_body(
+                    username,
+                    new_events,
+                    config.github,
+                    config.runtime.request_timeout_seconds,
+                )
+
+                if dry_run:
+                    print("DRY RUN: would send this email:")
+                    print("=" * 80)
+                    print("Subject:", subject)
+                    print(body)
+                    print("=" * 80)
+                else:
+                    send_email(config.email, subject, body)
+            else:
+                logging.info("No email needed for %s.", username)
+
+            user_state["seen_ids"] = update_seen_ids(
+                old_seen_ids,
+                events,
+                config.runtime.max_seen_ids,
+            )
+            user_state["etag"] = new_etag or user_state.get("etag")
+            user_state["last_success_at"] = now_iso()
+
+        except Exception:
+            logging.exception("Failed to monitor GitHub user '%s'.", username)
+            exit_code = 1
+
     maybe_save_state(state_file, state, dry_run)
-    return 0
+    return exit_code
 
 
 def create_config_from_example(config_path: Path) -> int:

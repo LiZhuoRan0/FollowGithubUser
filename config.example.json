@@ -1,6 +1,9 @@
 {
   "github": {
-    "username_to_watch": "xxx",
+    "usernames_to_watch": [
+      "xxx",
+      "yyy"
+    ],
     "token": "",
     "api_version": "2022-11-28",
     "events_per_page": 30,
