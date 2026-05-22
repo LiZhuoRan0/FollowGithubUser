@@ -84,9 +84,9 @@ github_activity_email_windows_qq/
 ├─ run_once.bat                    Runs once, for Task Scheduler
 ├─ run_once_visible.bat            Runs once and keeps the window open
 ├─ send_test_email.bat             Sends a QQ Mail test email
-├─ install_windows_task.bat        Adds a Windows scheduled task, every 10 minutes
+├─ install_windows_task.bat        Adds a Windows scheduled task, every 3 hours
 ├─ uninstall_windows_task.bat      Removes the scheduled task
-├─ run_monitor_loop.bat            Optional always-on loop, checks every 10 minutes
+├─ run_monitor_loop.bat            Optional always-on loop, checks every 3 hours
 ├─ .gitignore                      Prevents secrets and runtime files from being committed
 ├─ data/
 │  └─ .gitkeep                     Placeholder folder for logs and state
@@ -270,7 +270,7 @@ Example:
 
 ## 9. Optional: add a GitHub token
 
-For one user checked every 10 minutes, you may not need a token.
+For one user checked every 3 hours, you may not need a token.
 
 However, a token is recommended because GitHub applies stricter rate limits to unauthenticated requests.
 
@@ -332,7 +332,7 @@ The next time the watched user has new public GitHub activity, you should receiv
 
 ---
 
-## 12. Run automatically every 10 minutes
+## 12. Run automatically every 3 hours
 
 Double-click:
 
@@ -352,7 +352,7 @@ It runs:
 run_once.bat
 ```
 
-every 10 minutes.
+every 3 hours.
 
 To remove the scheduled task, double-click:
 
@@ -370,7 +370,7 @@ You can also double-click:
 run_monitor_loop.bat
 ```
 
-This keeps a command window open and checks every 10 minutes.
+This keeps a command window open and checks every 3 hours.
 
 Task Scheduler is usually better because it continues working after reboot if configured correctly.
 

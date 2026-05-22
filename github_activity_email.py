@@ -173,7 +173,10 @@ def load_config(config_path: Path) -> AppConfig:
 
     github = GithubConfig(
         usernames_to_watch=usernames_to_watch,
-        token=as_string(github_raw.get("token"), "").strip(),
+        token=(
+            as_string(github_raw.get("token"), "").strip()
+            or os.environ.get("GITHUB_TOKEN", "").strip()
+        ),
         api_version=as_string(github_raw.get("api_version"), "2022-11-28").strip(),
         events_per_page=max(1, min(as_int(github_raw.get("events_per_page"), 30), 100)),
         notify_event_types=as_string_list(github_raw.get("notify_event_types")),
@@ -233,7 +236,30 @@ def setup_logging(log_file: Path, verbose: bool = False) -> None:
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+class GitHubRateLimitError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        reset_at_utc: Optional[str] = None,
+        retry_after_seconds: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.reset_at_utc = reset_at_utc
+        self.retry_after_seconds = retry_after_seconds
 
+
+def epoch_to_utc_iso(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+
+    try:
+        return (
+            datetime.fromtimestamp(int(value), timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    except (TypeError, ValueError, OSError):
+        return None
 # -----------------------------
 # State management
 # -----------------------------
@@ -245,6 +271,9 @@ def default_user_state() -> Dict[str, Any]:
         "last_run_at": None,
         "last_success_at": None,
         "last_poll_interval_seconds": None,
+        "last_rate_limit_at": None,
+        "last_rate_limit_reset_at": None,
+        "last_retry_after_seconds": None,
     }
 
 
@@ -353,13 +382,41 @@ def fetch_public_events(
             "or the events endpoint is unavailable for this user."
         )
 
-    if response.status_code == 403:
+    if response.status_code in (403, 429):
         rate_remaining = response.headers.get("X-RateLimit-Remaining")
         rate_reset = response.headers.get("X-RateLimit-Reset")
+        retry_after = response.headers.get("Retry-After")
+        reset_at_utc = epoch_to_utc_iso(rate_reset)
+
+        if retry_after:
+            raise GitHubRateLimitError(
+                "GitHub rate limit hit. "
+                f"Retry-After={retry_after} seconds. "
+                f"X-RateLimit-Remaining={rate_remaining}, "
+                f"X-RateLimit-Reset={rate_reset}, "
+                f"reset_at_utc={reset_at_utc}. "
+                "Add a GitHub token or run less frequently.",
+                reset_at_utc=reset_at_utc,
+                retry_after_seconds=as_int(retry_after, 0),
+            )
+
+        if rate_remaining == "0":
+            raise GitHubRateLimitError(
+                "GitHub primary rate limit hit. "
+                f"X-RateLimit-Remaining={rate_remaining}, "
+                f"X-RateLimit-Reset={rate_reset}, "
+                f"reset_at_utc={reset_at_utc}. "
+                "Add a GitHub token or run less frequently.",
+                reset_at_utc=reset_at_utc,
+            )
+
         raise RuntimeError(
-            "GitHub returned 403 Forbidden. This is often a rate-limit issue. "
-            f"X-RateLimit-Remaining={rate_remaining}, X-RateLimit-Reset={rate_reset}. "
-            "Add a GitHub token in config.json or run less frequently."
+            "GitHub returned Forbidden/Too Many Requests, but it does not look like "
+            "a normal primary rate-limit response. "
+            f"HTTP={response.status_code}, "
+            f"X-RateLimit-Remaining={rate_remaining}, "
+            f"X-RateLimit-Reset={rate_reset}, "
+            f"Response={response.text[:500]}"
         )
 
     response.raise_for_status()
@@ -750,12 +807,22 @@ def run_monitor(config: AppConfig, dry_run: bool = False) -> int:
         was_first_run = len(old_seen_ids) == 0 and not user_state.get("last_success_at")
 
         try:
-            events, new_etag, poll_interval, not_modified = fetch_public_events(
-                config.github,
-                username=username,
-                etag=user_state.get("etag"),
-                timeout_seconds=config.runtime.request_timeout_seconds,
-            )
+            try:
+                events, new_etag, poll_interval, not_modified = fetch_public_events(
+                    config.github,
+                    username=username,
+                    etag=user_state.get("etag"),
+                    timeout_seconds=config.runtime.request_timeout_seconds,
+                )
+            except GitHubRateLimitError as exc:
+                state["last_run_at"] = now_iso()
+                state["last_rate_limit_at"] = now_iso()
+                state["last_rate_limit_reset_at"] = exc.reset_at_utc
+                state["last_retry_after_seconds"] = exc.retry_after_seconds
+
+                logging.warning("%s", exc)
+                maybe_save_state(state_file, state, dry_run)
+                return 0
 
             user_state["last_run_at"] = now_iso()
 
@@ -889,6 +956,7 @@ def main() -> int:
 
     try:
         config = load_config(config_path)
+        logging.info("GitHub token loaded: %s", "yes" if config.github.token else "no")
         setup_logging(resolve_path(config.runtime.log_file), verbose=args.verbose)
 
         if args.send_test:
