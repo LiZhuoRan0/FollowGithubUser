@@ -24,6 +24,7 @@ import logging
 import os
 import smtplib
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.header import Header
@@ -38,7 +39,58 @@ import requests
 APP_NAME = "github-activity-email-qq"
 DEFAULT_CONFIG_FILE = "config.json"
 
+def github_get(
+    url: str,
+    *,
+    headers: Dict[str, str],
+    params: Optional[Dict[str, Any]] = None,
+    timeout_seconds: int,
+) -> requests.Response:
+    max_attempts = 5
 
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=(10, timeout_seconds),
+            )
+
+            if response.status_code in (500, 502, 503, 504):
+                if attempt < max_attempts:
+                    sleep_seconds = min(30, 2 ** (attempt - 1))
+                    logging.warning(
+                        "GitHub server error HTTP %s. Attempt %s/%s. Retrying in %s seconds.",
+                        response.status_code,
+                        attempt,
+                        max_attempts,
+                        sleep_seconds,
+                    )
+                    time.sleep(sleep_seconds)
+                    continue
+
+            return response
+
+        except (
+            requests.exceptions.SSLError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as exc:
+            if attempt >= max_attempts:
+                raise
+
+            sleep_seconds = min(30, 2 ** (attempt - 1))
+            logging.warning(
+                "Temporary GitHub network/SSL error. Attempt %s/%s. Retrying in %s seconds. Reason: %s",
+                attempt,
+                max_attempts,
+                sleep_seconds,
+                exc,
+            )
+            time.sleep(sleep_seconds)
+
+    raise RuntimeError("Unexpected GitHub retry loop exit.")
 # -----------------------------
 # Configuration data structures
 # -----------------------------
@@ -362,7 +414,12 @@ def fetch_public_events(
     headers = build_github_headers(config, etag)
 
     logging.info("Checking GitHub public events for user '%s'.", username)
-    response = requests.get(url, headers=headers, params=params, timeout=timeout_seconds)
+    response = github_get(
+        url,
+        headers=headers,
+        params=params,
+        timeout_seconds=timeout_seconds,
+    )
 
     poll_interval_raw = response.headers.get("X-Poll-Interval")
     poll_interval = None
@@ -439,7 +496,11 @@ def fetch_compare(
     url = f"https://api.github.com/repos/{repo}/compare/{before}...{head}"
     headers = build_github_headers(config, etag=None)
 
-    response = requests.get(url, headers=headers, timeout=timeout_seconds)
+    response = github_get(
+        url,
+        headers=headers,
+        timeout_seconds=timeout_seconds,
+    )
     response.raise_for_status()
     return response.json()
 
@@ -885,6 +946,15 @@ def run_monitor(config: AppConfig, dry_run: bool = False) -> int:
             )
             user_state["etag"] = new_etag or user_state.get("etag")
             user_state["last_success_at"] = now_iso()
+
+        except requests.RequestException as exc:
+            logging.warning(
+                "Temporary GitHub network error for user '%s'. Will try again next run. Reason: %s",
+                username,
+                exc,
+            )
+            user_state["last_run_at"] = now_iso()
+            continue
 
         except Exception:
             logging.exception("Failed to monitor GitHub user '%s'.", username)
