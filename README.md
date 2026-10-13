@@ -81,12 +81,17 @@ github_activity_email_windows_qq/
 ├─ config.example.json             Example configuration
 ├─ requirements.txt                Python dependencies
 ├─ setup_venv.bat                  Creates virtual environment and installs dependencies
-├─ run_once.bat                    Runs once, for Task Scheduler
+├─ run_once.bat                    Runs once in a console window (manual use)
 ├─ run_once_visible.bat            Runs once and keeps the window open
+├─ run_hidden.vbs                  Runs once with no window at all (used by the scheduled task)
 ├─ send_test_email.bat             Sends a QQ Mail test email
-├─ install_windows_task.bat        Adds a Windows scheduled task, every 3 hours
+├─ install_windows_task.bat        Adds a silent Windows scheduled task, every 3 hours
+├─ install_windows_task.ps1        The task registration logic used by the .bat above
+├─ check_status.bat                Shows the task status and the latest log lines
 ├─ uninstall_windows_task.bat      Removes the scheduled task
-├─ run_monitor_loop.bat            Optional always-on loop, checks every 3 hours
+├─ run_monitor_loop.bat            Optional always-on loop, checks every 3 hours (window stays open)
+├─ run_monitor_loop_hidden.vbs     Same loop, but completely invisible
+├─ stop_hidden_monitor.bat         Stops run_monitor_loop_hidden.vbs
 ├─ .gitignore                      Prevents secrets and runtime files from being committed
 ├─ data/
 │  └─ .gitkeep                     Placeholder folder for logs and state
@@ -346,13 +351,28 @@ This creates a Windows scheduled task named:
 GitHubActivityEmailQQ
 ```
 
-It runs:
+It runs, every 3 hours, a chain that cannot show a window:
 
 ```text
-run_once.bat
+wscript.exe -> run_hidden.vbs -> .venv\Scripts\pythonw.exe github_activity_email.py
 ```
 
-every 3 hours.
+`wscript.exe` and `pythonw.exe` are windowless programs, so nothing pops up on
+screen while you work. You only notice it through the emails it sends and
+through `data\monitor.log`.
+
+If you installed an older version of this task before, simply run
+`install_windows_task.bat` again. It removes the old task and replaces it with
+the silent one.
+
+To look at it without opening Task Scheduler, double-click:
+
+```text
+check_status.bat
+```
+
+It prints the last run time, the last result code, the next run time, and the
+tail of `data\monitor.log`.
 
 To remove the scheduled task, double-click:
 
@@ -371,6 +391,18 @@ run_monitor_loop.bat
 ```
 
 This keeps a command window open and checks every 3 hours.
+
+If you want the same loop without any window, double-click:
+
+```text
+run_monitor_loop_hidden.vbs
+```
+
+Nothing is shown at all, not even in the taskbar. To stop it again, double-click:
+
+```text
+stop_hidden_monitor.bat
+```
 
 Task Scheduler is usually better because it continues working after reboot if configured correctly.
 
@@ -541,6 +573,41 @@ Possible causes:
 - You filtered the event type
 - You ignored the repository
 
+### I cannot see anything happening
+
+That is expected. The scheduled task is deliberately windowless, so it never
+shows a console window, a tray icon, or a popup.
+
+To confirm it is alive, double-click:
+
+```text
+check_status.bat
+```
+
+It shows the task's last run time and result, and the newest lines of
+`data\monitor.log`. Every run writes there, including "No new events" runs.
+
+If `data\monitor.log` does not change at all, check:
+
+```text
+data\hidden_run.log
+```
+
+That file is only created when the windowless launcher itself fails, for
+example when `.venv\Scripts\pythonw.exe` is missing because `setup_venv.bat`
+was never run.
+
+### I still see a window flashing every 3 hours
+
+The old task is still registered. Run:
+
+```text
+install_windows_task.bat
+```
+
+again and confirm with `check_status.bat` that `Task To Run` contains
+`wscript.exe` and not `run_once.bat`.
+
 ### I want to reset the monitor
 
 Delete:
@@ -563,10 +630,22 @@ Run once:
 .venv\Scripts\python.exe github_activity_email.py
 ```
 
+Run once with no window (what the scheduled task does):
+
+```bat
+wscript.exe //B run_hidden.vbs
+```
+
 Dry run without sending email:
 
 ```bat
 .venv\Scripts\python.exe github_activity_email.py --dry-run
+```
+
+Dry run with no window:
+
+```bat
+wscript.exe //B run_hidden.vbs --dry-run
 ```
 
 Send test email:

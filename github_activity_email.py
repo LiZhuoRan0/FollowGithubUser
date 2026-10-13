@@ -273,15 +273,18 @@ def setup_logging(log_file: Path, verbose: bool = False) -> None:
     # Clear handlers to avoid duplicate logs if called from tests.
     root.handlers.clear()
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(formatter)
-    console.setLevel(level)
-
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(formatter)
     file_handler.setLevel(level)
 
-    root.addHandler(console)
+    # pythonw.exe has no console, so only attach the console handler when
+    # there is somewhere to write to. The log file always gets everything.
+    if sys.stdout is not None:
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(formatter)
+        console.setLevel(level)
+        root.addHandler(console)
+
     root.addHandler(file_handler)
 
 

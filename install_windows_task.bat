@@ -2,14 +2,11 @@
 setlocal
 cd /d "%~dp0"
 
-set TASK_NAME=GitHubActivityEmailQQ
-set TASK_COMMAND=%~dp0run_once.bat
-
-echo Creating Windows Scheduled Task: %TASK_NAME%
-echo It will run every 3 hours.
+echo Registering the background (windowless) Windows Scheduled Task.
+echo It will check GitHub every 3 hours without showing any window.
 echo.
 
-schtasks /Create /TN "%TASK_NAME%" /TR "\"%TASK_COMMAND%\"" /SC MINUTE /MO 180 /F
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install_windows_task.ps1"
 
 if errorlevel 1 (
   echo.
@@ -20,8 +17,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo Scheduled task created.
-echo You can check it in Windows Task Scheduler.
+echo You can check the task in Windows Task Scheduler.
+echo Logs are written to data\monitor.log.
 echo.
 pause
 endlocal
