@@ -87,6 +87,8 @@ github_activity_email_windows_qq/
 ├─ send_test_email.bat             Sends a QQ Mail test email
 ├─ install_windows_task.bat        Adds a silent Windows scheduled task, every 3 hours
 ├─ install_windows_task.ps1        The task registration logic used by the .bat above
+├─ enable_run_when_logged_off.bat  Optional: keep checking even while nobody is logged on
+├─ enable_run_when_logged_off.ps1  The logic behind the .bat above (needs Administrator)
 ├─ check_status.bat                Shows the task status and the latest log lines
 ├─ uninstall_windows_task.bat      Removes the scheduled task
 ├─ run_monitor_loop.bat            Optional always-on loop, checks every 3 hours (window stays open)
@@ -361,6 +363,16 @@ wscript.exe -> run_hidden.vbs -> .venv\Scripts\pythonw.exe github_activity_email
 screen while you work. You only notice it through the emails it sends and
 through `data\monitor.log`.
 
+The task has two triggers:
+
+- every 3 hours, for as long as the task exists
+- 2 minutes after every logon, so starting or restarting Windows is followed by
+  an immediate check instead of waiting up to 3 hours
+
+It runs only while you are logged in, and no password is stored. If you also
+want it to keep checking while nobody is logged in, the task must be registered
+with "run whether user is logged on or not", which needs an Administrator shell.
+
 If you installed an older version of this task before, simply run
 `install_windows_task.bat` again. It removes the old task and replaces it with
 the silent one.
@@ -379,6 +391,38 @@ To remove the scheduled task, double-click:
 ```text
 uninstall_windows_task.bat
 ```
+
+### Reboots, shutdowns and logging off
+
+The task lives in the Windows Task Scheduler service, so rebooting does not
+remove it and does not need to be started again by hand. The run times are fixed
+points on a 3-hour grid (for example 19:47, 22:47, 01:47, ...) and simply carry
+on after a restart. Nothing runs twice because of a reboot: the reboot itself is
+not a trigger.
+
+One thing to know: by default the task only runs **while you are logged on**, so
+checks pause while the PC sits at the login screen and resume once you log in.
+If a run was missed while the PC was off, `StartWhenAvailable` makes it happen
+shortly after the machine is available again, and the grid continues as before.
+
+If you want the checks to continue even before you log in, double-click:
+
+```text
+enable_run_when_logged_off.bat
+```
+
+Approve the User Account Control prompt. This switches the task to "run whether
+the user is logged on or not" using S4U, so no password is stored. The next run
+stays on the existing grid and no extra check is triggered.
+
+Two caveats when running logged off:
+
+- A proxy app that only starts at logon (Clash for Windows, for example) will
+  not be running, so the script connects to GitHub and QQ Mail directly.
+- The desktop session is not there, so nothing can pop up a window. Everything
+  still lands in `data\monitor.log`, which `check_status.bat` shows.
+
+To go back to the default behaviour, run `install_windows_task.bat` again.
 
 ---
 
